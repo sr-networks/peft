@@ -525,6 +525,7 @@ class LoraConfig(PeftConfig):
             "loftq",
             "orthogonal",
             "mica",
+            "mica_act",
         ]
     ) = field(
         default=True,

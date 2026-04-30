@@ -242,6 +242,9 @@ class LoraLayer(BaseTunerLayer):
         elif isinstance(init_lora_weights, str) and init_lora_weights.lower() == "mica":
             with gather_params_ctx(self.get_base_layer().weight):
                 self.mica_init(adapter_name)
+        elif isinstance(init_lora_weights, str) and init_lora_weights.lower() == "mica_act":
+            with gather_params_ctx(self.get_base_layer().weight):
+                self.mica_act_init(adapter_name)
         elif init_lora_weights == "loftq":
             with gather_params_ctx(self.get_base_layer().weight):
                 self.loftq_init(adapter_name, config)
@@ -437,6 +440,41 @@ class LoraLayer(BaseTunerLayer):
         lora_B = V[:, -r:].contiguous()
         lora_A = torch.zeros(r, weight.shape[1], device=weight.device)
         self.lora_B[adapter_name].weight.data = lora_B.to(dtype)
+        self.lora_A[adapter_name].weight.data = lora_A.to(dtype)
+
+    def mica_act_init(self, adapter_name):
+        """MiCA on activations: `lora_B` = bottom-r eigenvectors of the output-activation
+        covariance C_y = sum(Y^T Y), where Y = X W^T over a calibration corpus.
+
+        The covariance (or its bottom-r eigenvectors directly) must be precomputed and
+        attached to the base layer as `linear.mica_act_B` (shape: [out_features, r]) before
+        `get_peft_model` is called. Pattern mirrors how CorDA reads `linear.eigens`.
+        Like `mica_init`, `lora_A` is zero so the adapter contribution is zero at init,
+        and `MiCALinearVariant` keeps `lora_B` frozen during training.
+        """
+        if self.lora_B[adapter_name].weight.device.type == "meta":
+            return
+        linear = self.get_base_layer()
+        if not hasattr(linear, "mica_act_B"):
+            raise ValueError(
+                "`mica_act_B` attribute not found on base layer. Run a calibration pass "
+                "to compute the activation-covariance bottom-r eigenvectors and attach "
+                "them as `linear.mica_act_B` before calling `get_peft_model`."
+            )
+        B = linear.mica_act_B
+        r = self.r[adapter_name]
+        if B.shape[1] != r:
+            raise ValueError(
+                f"`linear.mica_act_B` has {B.shape[1]} columns but adapter `r={r}`."
+            )
+        if B.shape[0] != linear.weight.shape[0]:
+            raise ValueError(
+                f"`linear.mica_act_B` has {B.shape[0]} rows but layer out_features="
+                f"{linear.weight.shape[0]}."
+            )
+        dtype = linear.weight.dtype
+        lora_A = torch.zeros(r, linear.weight.shape[1], device=linear.weight.device)
+        self.lora_B[adapter_name].weight.data = B.contiguous().to(dtype)
         self.lora_A[adapter_name].weight.data = lora_A.to(dtype)
 
     def corda_init(self, adapter_name, init_lora_weights):
@@ -850,7 +888,7 @@ class Linear(nn.Module, LoraLayer):
 
             return BdLoraLinearVariant()
 
-        if isinstance(config.init_lora_weights, str) and config.init_lora_weights.lower() == "mica":
+        if isinstance(config.init_lora_weights, str) and config.init_lora_weights.lower() in ("mica", "mica_act"):
             from .variants import MiCALinearVariant
 
             return MiCALinearVariant()
