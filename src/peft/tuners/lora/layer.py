@@ -456,11 +456,18 @@ class LoraLayer(BaseTunerLayer):
             return
         linear = self.get_base_layer()
         if not hasattr(linear, "mica_act_B"):
-            raise ValueError(
-                "`mica_act_B` attribute not found on base layer. Run a calibration pass "
-                "to compute the activation-covariance bottom-r eigenvectors and attach "
-                "them as `linear.mica_act_B` before calling `get_peft_model`."
+            # Most common reason: loading an adapter checkpoint via from_pretrained.
+            # The default zero-init on lora_B has already happened; the saved weights
+            # will overwrite it on load. For the fresh-training case, the caller
+            # should have attached `linear.mica_act_B` before get_peft_model.
+            import warnings
+            warnings.warn(
+                f"`mica_act_B` not found on {type(linear).__name__}; skipping mica_act init "
+                "(saved adapter weights will be loaded if available). For a fresh training "
+                "run, attach `linear.mica_act_B` (computed from a calibration pass) before "
+                "calling get_peft_model."
             )
+            return
         B = linear.mica_act_B
         r = self.r[adapter_name]
         if B.shape[1] != r:
